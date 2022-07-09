@@ -41,33 +41,3 @@ func SaveScreen() (*Screen, error) {
 
 	return screen, nil
 }
-
-func UpdateScreen(screen *Screen) error {
-	session := session.Must(session.NewSessionWithOptions(session.Options{
-		SharedConfigState: session.SharedConfigEnable,
-	}))
-
-	svc := dynamodb.New(session)
-	input := &dynamodb.UpdateItemInput{
-		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
-			":w": {
-				N: aws.String(screen.WalletAddress),
-			},
-		},
-		TableName: aws.String(ScreensCollectionName),
-		Key: map[string]*dynamodb.AttributeValue{
-			"id": {
-				N: aws.String(screen.ID),
-			},
-		},
-		ReturnValues:     aws.String("UPDATED_NEW"),
-		UpdateExpression: aws.String("set wallet_address = :w"),
-	}
-
-	_, err := svc.UpdateItem(input)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}

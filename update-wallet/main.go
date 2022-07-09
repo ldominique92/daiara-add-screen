@@ -30,10 +30,10 @@ const (
 )
 
 type dynamoDBSessionTableRow struct {
-	ScreenID      string `json:"screen_id"`
-	TwoFactorCode string `json:"two_factor_code"`
-	Start         string `json:"start"`
-	End           string `json:"end"`
+	ScreenID string `json:"screen_id"`
+	Token    string `json:"session_token"`
+	Start    string `json:"start"`
+	End      string `json:"end"`
 }
 
 type dynamoDBScreenTableRow struct {
@@ -99,13 +99,13 @@ func updateScreen(screen *dynamoDBScreenTableRow) error {
 	input := &dynamodb.UpdateItemInput{
 		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
 			":w": {
-				N: aws.String(screen.WalletAddress),
+				S: aws.String(screen.WalletAddress),
 			},
 		},
 		TableName: aws.String(screensCollectionName),
 		Key: map[string]*dynamodb.AttributeValue{
 			"id": {
-				N: aws.String(screen.ID),
+				S: aws.String(screen.ID),
 			},
 		},
 		ReturnValues:     aws.String("UPDATED_NEW"),
@@ -218,7 +218,7 @@ func handler(request events.APIGatewayV2HTTPRequest) (events.APIGatewayProxyResp
 		}, nil
 	}
 
-	if activeSession.TwoFactorCode != sessionToken.AuthenticationToken {
+	if activeSession.Token != sessionToken.AuthenticationToken {
 		log.Printf("Two factor authentication code does not match for screen %s", sessionToken.ScreenID)
 		return events.APIGatewayProxyResponse{
 			Body:       "Two factor authentication code does not match",
