@@ -1,10 +1,9 @@
 package main
 
 import (
-	"crypto/aes"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/golang-jwt/jwt"
 	"log"
 	"net/http"
 	"time"
@@ -21,19 +20,20 @@ const (
 	// Dynamo
 	dynamoSessionCollectionName = "sessions"
 	screensCollectionName       = "screens"
+	dateTimeLayout              = "2006-01-02 15:04:05"
 
 	// Alchemy
 	alchemyGetNFTSAPIURL = "https://eth-mainnet.alchemyapi.io/nft/v2/lSHAClf-5A5mj37BJ82gVdRMHiXbX7LC/getNFTs"
 
 	// Encryption
-	encryptionKey = "Daiara4K"
+	secretKey = "MZI4MTGZNDKWNZA2"
 )
 
 type dynamoDBSessionTableRow struct {
 	ScreenID string `json:"screen_id"`
 	Token    string `json:"session_token"`
-	Start    string `json:"start"`
-	End      string `json:"end"`
+	Start    string `json:"start_time"`
+	End      string `json:"end_time"`
 }
 
 type dynamoDBScreenTableRow struct {
@@ -43,13 +43,9 @@ type dynamoDBScreenTableRow struct {
 }
 
 type functionRequestBody struct {
+	ScreenID      string `json:"screen_id"`
 	SessionToken  string `json:"session_token"`
 	WalletAddress string `json:"wallet_address"`
-}
-
-type SessionToken struct {
-	ScreenID            string `json:"screen_id"`
-	AuthenticationToken string `json:"authentication_token"`
 }
 
 func getActiveSession(screenID string) (*dynamoDBSessionTableRow, error) {
@@ -72,7 +68,7 @@ func getActiveSession(screenID string) (*dynamoDBSessionTableRow, error) {
 	}
 
 	if result.Item == nil {
-		return nil, nil
+		return nil, fmt.Errorf("there's no active session for screen %s", screenID)
 	}
 
 	_session := dynamoDBSessionTableRow{}
@@ -81,13 +77,13 @@ func getActiveSession(screenID string) (*dynamoDBSessionTableRow, error) {
 		return nil, err
 	}
 
-	now := time.Now().String()
+	now := time.Now().UTC().Format(dateTimeLayout)
 
-	if _session.Start <= now && _session.Start >= now {
+	if _session.Start <= now && _session.End >= now {
 		return &_session, nil
 	}
 
-	return nil, nil
+	return nil, fmt.Errorf("session expired. Valid from %s to %s. Now: %s", _session.Start, _session.End, now)
 }
 
 func updateScreen(screen *dynamoDBScreenTableRow) error {
@@ -135,21 +131,6 @@ func isValidWalletAddress(walletAddress string) (bool, error) {
 	return true, nil
 }
 
-func decryptSessionToken(sessionToken string) (string, error) {
-	key := []byte(encryptionKey)
-	ciphertext, _ := hex.DecodeString(sessionToken)
-
-	c, err := aes.NewCipher(key)
-	if err != nil {
-		return "", err
-	}
-
-	pt := make([]byte, len(ciphertext))
-	c.Decrypt(pt, ciphertext)
-
-	return string(pt[:]), nil
-}
-
 func handler(request events.APIGatewayV2HTTPRequest) (events.APIGatewayProxyResponse, error) {
 	var requestBody functionRequestBody
 	err := json.Unmarshal([]byte(request.Body), &requestBody)
@@ -161,26 +142,7 @@ func handler(request events.APIGatewayV2HTTPRequest) (events.APIGatewayProxyResp
 		}, nil
 	}
 
-	sessionTokenJson, err := decryptSessionToken(requestBody.SessionToken)
-	if err != nil {
-		log.Printf("Invalid session token %s: %s", request.Body, fmt.Errorf("%w", err))
-		return events.APIGatewayProxyResponse{
-			Body:       "Invalid request",
-			StatusCode: 400,
-		}, nil
-	}
-
-	var sessionToken SessionToken
-	err = json.Unmarshal([]byte(sessionTokenJson), &sessionToken)
-	if err != nil {
-		log.Printf("Failed to unmarshal request body (%s): %s", request.Body, fmt.Errorf("%w", err))
-		return events.APIGatewayProxyResponse{
-			Body:       "Invalid request",
-			StatusCode: 400,
-		}, nil
-	}
-
-	if sessionToken.ScreenID == "" {
+	if requestBody.ScreenID == "" {
 		return events.APIGatewayProxyResponse{
 			Body:       "Invalid screen ID",
 			StatusCode: 400,
@@ -194,43 +156,52 @@ func handler(request events.APIGatewayV2HTTPRequest) (events.APIGatewayProxyResp
 		}, nil
 	}
 
-	if sessionToken.AuthenticationToken == "" {
+	if requestBody.SessionToken == "" {
 		return events.APIGatewayProxyResponse{
-			Body:       "Invalid two factor code",
+			Body:       "Invalid session code",
 			StatusCode: 400,
 		}, nil
 	}
 
-	activeSession, err := getActiveSession(sessionToken.ScreenID)
+	activeSession, err := getActiveSession(requestBody.ScreenID)
 	if err != nil {
-		log.Printf("Failed to retrieve active session for screen %s: %s", sessionToken.ScreenID, fmt.Errorf("%w", err))
+		log.Printf("Failed to retrieve active session for screen %s: %s", requestBody.ScreenID, fmt.Errorf("%w", err))
 		return events.APIGatewayProxyResponse{
-			Body:       "Failed to retrieve active session for screen",
+			Body:       "Unexpected error",
 			StatusCode: 500,
 		}, nil
 	}
 
 	if activeSession == nil {
-		log.Printf("There's no active session for screen %s", sessionToken.ScreenID)
+		log.Printf("There's no active session for screen %s", requestBody.ScreenID)
 		return events.APIGatewayProxyResponse{
 			Body:       "There's no active session for screen",
 			StatusCode: 403,
 		}, nil
 	}
 
-	if activeSession.Token != sessionToken.AuthenticationToken {
-		log.Printf("Two factor authentication code does not match for screen %s", sessionToken.ScreenID)
+	expectedSessionToken, err := generateJWT(requestBody.ScreenID, activeSession.Token)
+	if err != nil {
+		log.Printf("Failed to encrpyt session token screenID(%s) token(%s): %s", requestBody.ScreenID, activeSession.Token, fmt.Errorf("%w", err))
 		return events.APIGatewayProxyResponse{
-			Body:       "Two factor authentication code does not match",
+			Body:       "Unexpected error",
+			StatusCode: 500,
+		}, nil
+	}
+
+	if expectedSessionToken != requestBody.SessionToken {
+		log.Printf("Wrong session token provided for screenID(%s). Expected token: %s", requestBody.ScreenID, expectedSessionToken)
+		return events.APIGatewayProxyResponse{
+			Body:       "Session token code is invalid or expired",
 			StatusCode: 403,
 		}, nil
 	}
 
 	isValidWallet, err := isValidWalletAddress(requestBody.WalletAddress)
 	if err != nil {
-		log.Printf("Failed to validate wallet address %s for screen %s: %s", requestBody.WalletAddress, sessionToken.ScreenID, fmt.Errorf("%w", err))
+		log.Printf("Failed to validate wallet address %s for screen %s: %s", requestBody.WalletAddress, requestBody.ScreenID, fmt.Errorf("%w", err))
 		return events.APIGatewayProxyResponse{
-			Body:       "Failed to retrieve active session for screen",
+			Body:       "Unexpected error",
 			StatusCode: 500,
 		}, nil
 	}
@@ -243,16 +214,40 @@ func handler(request events.APIGatewayV2HTTPRequest) (events.APIGatewayProxyResp
 	}
 
 	screen := dynamoDBScreenTableRow{
-		ID:            sessionToken.ScreenID,
+		ID:            requestBody.ScreenID,
 		WalletAddress: requestBody.WalletAddress,
 	}
 
 	err = updateScreen(&screen)
+	if err != nil {
+		log.Printf("Failed to update wallet address %s for screen %s: %s", requestBody.WalletAddress, requestBody.ScreenID, fmt.Errorf("%w", err))
+		return events.APIGatewayProxyResponse{
+			Body:       "Unexpected error",
+			StatusCode: 500,
+		}, nil
+	}
 
 	return events.APIGatewayProxyResponse{
 		Headers:    map[string]string{"Content-Type": "application/json"},
 		StatusCode: 200,
 	}, nil
+}
+
+func generateJWT(screenID, sessionToken string) (string, error) {
+	var mySigningKey = []byte(secretKey)
+	token := jwt.New(jwt.SigningMethodHS256)
+	claims := token.Claims.(jwt.MapClaims)
+
+	claims["authorized"] = true
+	claims["screen_id"] = screenID
+	claims["session_token"] = sessionToken
+
+	tokenString, err := token.SignedString(mySigningKey)
+
+	if err != nil {
+		return "", err
+	}
+	return tokenString, nil
 }
 
 func main() {

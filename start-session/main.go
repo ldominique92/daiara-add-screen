@@ -33,8 +33,8 @@ const (
 type dynamoDBSessionTableRow struct {
 	ScreenID string `json:"screen_id"`
 	Token    string `json:"session_token"`
-	Start    string `json:"start"`
-	End      string `json:"end"`
+	Start    string `json:"start_time"`
+	End      string `json:"end_time"`
 }
 
 type functionResponseBody struct {
@@ -126,7 +126,7 @@ func refreshSession(screenID string, token string) error {
 				},
 			},
 			ReturnValues:     aws.String("UPDATED_NEW"),
-			UpdateExpression: aws.String("set session_token = :t, start = :s, end = :e"),
+			UpdateExpression: aws.String("set session_token = :t, start_time = :s, end_time = :e"),
 		}
 
 		_, err := svc.UpdateItem(input)
@@ -220,15 +220,14 @@ func handler(request events.APIGatewayV2HTTPRequest) (events.APIGatewayProxyResp
 	}, nil
 }
 
-func generateJWT(email, role string) (string, error) {
+func generateJWT(screenID, sessionToken string) (string, error) {
 	var mySigningKey = []byte(secretKey)
 	token := jwt.New(jwt.SigningMethodHS256)
 	claims := token.Claims.(jwt.MapClaims)
 
 	claims["authorized"] = true
-	claims["screen_id"] = email
-	claims["session_token"] = role
-	claims["exp"] = time.Now().Add(time.Minute * 5).Unix()
+	claims["screen_id"] = screenID
+	claims["session_token"] = sessionToken
 
 	tokenString, err := token.SignedString(mySigningKey)
 
