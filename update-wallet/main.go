@@ -83,7 +83,7 @@ func getActiveSession(screenID string) (*dynamoDBSessionTableRow, error) {
 		return &_session, nil
 	}
 
-	return nil, fmt.Errorf("session expired. Valid from %s to %s. Now: %s", _session.Start, _session.End, now)
+	return nil, nil
 }
 
 func updateScreen(screen *dynamoDBScreenTableRow) error {
