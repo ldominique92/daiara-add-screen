@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/golang-jwt/jwt"
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/golang-jwt/jwt"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
@@ -19,7 +21,7 @@ import (
 const (
 	// Dynamo
 	dynamoSessionCollectionName = "sessions"
-	screensCollectionName       = "screens"
+	dynamoScreensCollectionName = "screens"
 	dateTimeLayout              = "2006-01-02 15:04:05"
 
 	// Alchemy
@@ -37,15 +39,24 @@ type dynamoDBSessionTableRow struct {
 }
 
 type dynamoDBScreenTableRow struct {
-	ID             string `json:"id"`
-	RegisteredDate string `json:"registered_date"`
-	WalletAddress  string `json:"wallet_address"`
+	ID                    string `json:"id"`
+	RegisteredDate        string `json:"registered_date"`
+	WalletAddress         string `json:"wallet_address"`
+	PushNotificationToken string `json:"push_notification_token"`
 }
 
 type functionRequestBody struct {
 	ScreenID      string `json:"screen_id"`
 	SessionToken  string `json:"session_token"`
 	WalletAddress string `json:"wallet_address"`
+}
+
+type pushNotificationMessage struct {
+	To    string            `json:"to"`
+	Sound string            `json:"sound"`
+	Title string            `json:"title"`
+	Body  string            `json:"body"`
+	Data  map[string]string `json:"data"`
 }
 
 func getActiveSession(screenID string) (*dynamoDBSessionTableRow, error) {
@@ -98,7 +109,7 @@ func updateScreen(screen *dynamoDBScreenTableRow) error {
 				S: aws.String(screen.WalletAddress),
 			},
 		},
-		TableName: aws.String(screensCollectionName),
+		TableName: aws.String(dynamoScreensCollectionName),
 		Key: map[string]*dynamodb.AttributeValue{
 			"id": {
 				S: aws.String(screen.ID),
@@ -227,10 +238,99 @@ func handler(request events.APIGatewayV2HTTPRequest) (events.APIGatewayProxyResp
 		}, nil
 	}
 
+	pushNotificationToken, err := getPushNotificationToken(requestBody.ScreenID)
+	if err != nil {
+		log.Printf("Failed to get push notification token for screen %s: %s", requestBody.ScreenID, fmt.Errorf("%w", err))
+		return events.APIGatewayProxyResponse{
+			Body:       "Unexpected error",
+			StatusCode: 500,
+		}, nil
+	}
+
+	if pushNotificationToken == nil {
+		log.Printf("notification token for screen %s not found", requestBody.ScreenID)
+		return events.APIGatewayProxyResponse{
+			Body:       "Unexpected error",
+			StatusCode: 422,
+		}, nil
+	}
+
+	err = sendPushNotification(*pushNotificationToken, requestBody.WalletAddress)
+	if err != nil {
+		log.Printf("Failed to send push notification with wallet address %s for screen %s: %s", requestBody.WalletAddress, requestBody.ScreenID, fmt.Errorf("%w", err))
+		return events.APIGatewayProxyResponse{
+			Body:       "Unexpected error",
+			StatusCode: 500,
+		}, nil
+	}
+
 	return events.APIGatewayProxyResponse{
 		Headers:    map[string]string{"Content-Type": "application/json"},
 		StatusCode: 200,
 	}, nil
+}
+
+func getPushNotificationToken(screenID string) (*string, error) {
+	dbSession := session.Must(session.NewSessionWithOptions(session.Options{
+		SharedConfigState: session.SharedConfigEnable,
+	}))
+
+	svc := dynamodb.New(dbSession)
+	result, err := svc.GetItem(&dynamodb.GetItemInput{
+		TableName: aws.String(dynamoScreensCollectionName),
+		Key: map[string]*dynamodb.AttributeValue{
+			"id": {
+				S: aws.String(screenID),
+			},
+		},
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	if result.Item == nil {
+		return nil, fmt.Errorf("screen %s not found", screenID)
+	}
+
+	screen := dynamoDBScreenTableRow{}
+	err = dynamodbattribute.UnmarshalMap(result.Item, &screen)
+	if err != nil {
+		return nil, err
+	}
+
+	return &screen.PushNotificationToken, nil
+}
+
+func sendPushNotification(pushNotificationToken, walletAddress string) error {
+	message := pushNotificationMessage{
+		To:    pushNotificationToken,
+		Sound: "default",
+		Title: "New wallet added",
+		Body:  "click here to accept",
+		Data:  map[string]string{"wallet_address": walletAddress},
+	}
+
+	jsonValue, _ := json.Marshal(message)
+
+	req, err := http.NewRequest("POST", "https://exp.host/--/api/v2/push/send", bytes.NewBuffer(jsonValue))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-encoding", "gzip, deflate")
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	res, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+
+	defer res.Body.Close()
+
+	return nil
 }
 
 func generateJWT(screenID, sessionToken string) (string, error) {

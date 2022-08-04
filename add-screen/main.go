@@ -21,14 +21,14 @@ const authToken = "c2VtcmFib25hb3ZhbGVuYWRh="
 const ScreensCollectionName = "screens"
 
 type functionRequestBody struct {
-	PushNotificationToken string `json:"pushNotificationToken"`
+	PushNotificationToken string `json:"push_notification_token"`
 }
 
 type Screen struct {
 	ID                    string `json:"id"`
 	RegisteredDate        string `json:"registered_date"`
 	WalletAddress         string `json:"wallet_address"`
-	PushNotificationToken string `json:"pushNotificationToken"`
+	PushNotificationToken string `json:"push_notification_token"`
 }
 
 func handler(request events.APIGatewayV2HTTPRequest) (events.APIGatewayProxyResponse, error) {
